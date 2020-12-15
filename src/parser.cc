@@ -1,125 +1,277 @@
 #include <argparse.h>
-#include <cstring>
+
+#include <cstdarg>
+#include <cstdio>
+#include <stdexcept>
 
 using namespace hgl;
+using namespace std::literals::string_view_literals;
 
-void ArgumentParser::add_arg(Argument && a)
+static constexpr auto _strbuf_size = 256;
+static thread_local char _strbug[_strbuf_size];
+
+[[noreturn]] static void _throw_parse_error(const char * fmt, ...)
 {
-    this->args.insert(std::move(a));
+    std::va_list ap;
+
+    va_start(ap, fmt);
+    std::vsnprintf(_strbug, _strbuf_size, fmt, ap);
+    va_end(ap);
+
+    throw ArgumentParseError(_strbug);
 }
 
-void ArgumentParser::add_args(std::initializer_list<Argument> && l)
+[[noreturn]] static void _throw_std_invalid_argument(const char * fmt, ...)
 {
-    for (auto && a : l)
-        this->args.insert(std::move(a));
+    std::va_list ap;
+
+    va_start(ap, fmt);
+    std::vsnprintf(_strbug, _strbuf_size, fmt, ap);
+    va_end(ap);
+
+    throw std::invalid_argument(_strbug);
 }
 
-std::ostream & ArgumentParser::help(std:: ostream & os) const noexcept
+[[noreturn]] static void _throw_0a_req_qa_given(
+    const char * text, const OptionWrapper * opt)
 {
-    for (auto & a : this->args)
+    std::string buffer;
+    opt->get_name(buffer);
+    _throw_parse_error("\"%s\": option %s consumes 0 argument "
+        "but 1 is given", text, buffer.c_str());
+}
+
+[[noreturn]] static void _throw_not_restargs_recv(const char * text)
+{
+    _throw_parse_error("\"%s\": unexpected rest-arguments", text);
+}
+
+[[noreturn]] static void _throw_unknown_opt(const char * text, std::string_view opt)
+{
+    std::string buffer(opt);
+    _throw_parse_error("\"%s\": unknown option: %s", text, buffer.c_str());
+}
+
+[[noreturn]] static void _throw_too_many_args(const char * text, std::string_view opt)
+{
+    std::string buffer(opt);
+    _throw_parse_error("\"%s\": too may arguments for option %s", text, buffer.c_str());
+}
+
+void ArgumentParser::chech_options()
+{
+    for (OptionWrapper * opt: this->options)
     {
-        os << a.name << "\t--" << a.long_opt << "\t -" << a.short_opt << '\n';
+        if (opt->short_opt != opt->no_short_option)
+        {
+            for (OptionWrapper * opt1: this->options)
+            {
+                if (opt1->short_opt == opt1->no_short_option || opt1 == opt)
+                    continue;
+
+                if (opt1->short_opt == opt->short_opt)
+                    _throw_std_invalid_argument("more than one options have %s name '%c'", "short", opt->short_opt);
+            }
+        }
+
+
+        if (opt->long_opt != opt->no_long_option)
+        {
+            for (OptionWrapper * opt1: this->options)
+            {
+                if (opt1->long_opt == opt1->no_long_option || opt1 == opt)
+                    continue;
+
+                if (opt1->long_opt == opt->long_opt)
+                    _throw_std_invalid_argument("more than one options have %s name \"%s\"", "long", opt->long_opt);
+            }
+        }
+    }
+}
+
+void ArgumentParser::operator()(int argc, const char * argv[])
+{
+    using arg_t = const char *;
+
+    if (argc == 0)
+        return;
+
+    {
+        this->prog_name = argv[0];
+        const auto slash_pos = this->prog_name.find('/');
+        if (slash_pos != this->prog_name.npos)
+            this->prog_name.remove_prefix(slash_pos + 1);
     }
 
-    return os;
-}
+    arg_t * iter = argv + 1;
+    const arg_t * iter_end = argv + argc;
+    std::string_view cur_opt, value;
 
-void ArgumentParser::parse(int argc, const char * argv[])
-{
-    this->progname = argv[0];
-
-    for (int i = 1; i < argc; i++)
+    for (; iter < iter_end; ++iter)
     {
-        const char * argstr = argv[i];
+        cur_opt = *iter;
 
-        if (argstr[0] == '\0')
-            throw Error("unexpected end-of-string");
-
-        if (argstr[0] == '-')
+        if (cur_opt == "--"sv)
         {
-            if (argstr[1] == '-')
+            if (this->rest_args == nullptr)
+                _throw_not_restargs_recv(*iter);
+
+            for (++iter; iter != iter_end; ++iter)
+                this->rest_args->append(*iter);
+        }
+        else if (cur_opt == "-"sv)
+        {
+            if (this->rest_args == nullptr)
+                _throw_not_restargs_recv(*iter);
+
+            this->rest_args->append(cur_opt);
+        }
+#ifdef __cpp_lib_starts_ends_with
+        else if (cur_opt.starts_with("--"sv))
+#else
+        else if (cur_opt.substr(0, 2) == "--"sv)
+#endif
+        {
+            cur_opt.remove_prefix(2);
+
+            const auto equal_pos = cur_opt.find('=');
+            if (equal_pos != cur_opt.npos) // e.g. "xxx=yyy"
             {
-                if (argstr[2] != '\0') // long arg
-                {
-                    argstr += 2;
-                    bool not_found = true;
-                    for (auto & a : this->args)
-                    {
-                        if (std::strcmp(argstr, a.long_opt) == 0)
-                        {
-                            if (a.number == 1)
-                                if (++i == argc)
-                                    throw Error("not enugh input args");
-                                else
-                                    const_cast<Argument&>(a).set_value(argv[i]);
-                            else if (a.number == 0)
-                                const_cast<Argument&>(a).set_value("1");
-                            else
-                                throw Error("not implemented");
-                            not_found = false;
-                            break;
-                        }
-                    }
-                    if (not_found)
-                        throw Error("no such argument");
-                }
-                else // "--"
-                {
-                    while (i < argc)
-                    {
-                        this->rest_args.push_back(argv[++i]);
-                    }
-                }
+                value = cur_opt.substr(equal_pos + 1); // "yyy"
+                cur_opt.remove_suffix(value.size() + 1); // "xxx"
             }
-            else if (argstr[0] != '\0') // short arg
+
+            for (OptionWrapper * opt: this->options)
             {
-                argstr += 1;
-                char argch = *argstr;
-                bool not_found = true;
-                for (auto & a : this->args)
+                if (opt->long_opt == opt->no_long_option
+                 || opt->long_opt != cur_opt)
+                    continue;
+
+                if (opt->args_given >= opt->n_args
+                 && !(opt->takes_0_or_1_arg && opt->args_given <= 1))
+                    _throw_too_many_args(*iter, cur_opt);
+
+                if (equal_pos != cur_opt.npos)
                 {
-                    if (argch == a.short_opt)
-                    {
-                        if (a.number == 1)
-                            if (argstr[1] != '\0')
-                                const_cast<Argument&>(a).set_value(argstr + 1);
-                            else if (++i == argc)
-                                throw Error("not enugh input args");
-                            else
-                                const_cast<Argument&>(a).set_value(argv[i]);
-                        else if (a.number == 0)
-                            if (argstr[1] == '\0')
-                                const_cast<Argument&>(a).set_value("1");
-                            else
-                                const_cast<Argument&>(a).set_value(argstr + 1);
-                        else
-                            throw Error("not implemented");
-                        not_found = false;
-                        break;
-                    }
+                    if (opt->n_args == 0)
+                        _throw_0a_req_qa_given(*iter, opt);
+
+                    opt->parse_from_text(value);
+                    opt->args_given++;
                 }
-                if (not_found)
-                    throw Error("no such argument");
+
+                if (opt->n_args == 0)
+                {
+                    opt->parse_from_text(""sv);
+                    goto _NEXT_LOOP;
+                }
+
+                for (++iter;
+                    opt->args_given < opt->n_args && iter != iter_end && **iter != '-';
+                    opt->args_given++, ++iter)
+                {
+                    opt->parse_from_text(*iter);
+                }
+                --iter;
+
+                goto _NEXT_LOOP;
             }
-            else // "-"
+
+            _throw_unknown_opt(*iter, cur_opt);
+        }
+#ifdef __cpp_lib_starts_ends_with
+        else if (cur_opt.starts_with('-'))
+#else
+        else if (!cur_opt.empty() && cur_opt.front() == '-')
+#endif
+        {
+            cur_opt.remove_prefix(1);
+
+            const bool has_value = cur_opt.length() > 1;
+            if (has_value) // e.g. "-fZZZ"
             {
-                this->rest_args.push_back(argstr);
+                value = cur_opt.substr(1); // "ZZZ"
+                cur_opt.remove_suffix(value.size()); // "f"
             }
+
+            for (OptionWrapper * opt: this->options)
+            {
+                if (opt->short_opt == opt->no_short_option
+                 || opt->short_opt != cur_opt.front())
+                    continue;
+
+                if (opt->args_given >= opt->n_args && opt->args_given > 0
+                 && !(opt->takes_0_or_1_arg && opt->args_given <= 1))
+                    _throw_too_many_args(*iter, cur_opt);
+
+                if (has_value)
+                {
+                    if (opt->n_args == 0)
+                        _throw_0a_req_qa_given(*iter, opt);
+
+                    opt->parse_from_text(value);
+                    opt->args_given++;
+                }
+
+                if (opt->n_args == 0)
+                {
+                    opt->parse_from_text(""sv);
+                    goto _NEXT_LOOP;
+                }
+
+                for (++iter;
+                    opt->args_given < opt->n_args && iter != iter_end && **iter != '-';
+                    opt->args_given++, ++iter)
+                {
+                    opt->parse_from_text(*iter);
+                }
+                --iter;
+
+                goto _NEXT_LOOP;
+            }
+
+            _throw_unknown_opt(*iter, cur_opt);
         }
         else
         {
-            this->rest_args.push_back(argstr);
+            if (this->rest_args == nullptr)
+                _throw_not_restargs_recv(*iter);
+
+            this->rest_args->append(cur_opt);
+        }
+
+    _NEXT_LOOP:;
+    }
+
+    for (OptionWrapper * opt: this->options)
+    {
+        if (!(opt->args_given >= opt->n_args
+         || !opt->is_required
+         || opt->has_default
+         || (opt->n_args == 1 && opt->takes_0_or_1_arg)))
+        {
+            std::string name;
+            opt->get_name(name);
+            _throw_parse_error("option %s takes %i arg(s) but %i were given",
+                name.c_str(), opt->n_args, opt->args_given);
         }
     }
 }
 
-const ArgumentParser::Argument &
-ArgumentParser::operator[](const char * name) const
+
+std::ostream & ArgumentParser::print_help(std::ostream & out) const noexcept
 {
-    for (auto & a : this->args)
+    out << "Usage: " << this->prog_name << " [OPTIONS]";
+    if (this->rest_args != nullptr)
+        out << " ...";
+    out << '\n' << '\n';
+
+    out << "Options:\n";
+    for (OptionWrapper * opt: this->options)
     {
-        if (std::strcmp(a.name, name) == 0)
-            return a;
+        opt->print_help(out);
+        out << '\n';
     }
-    throw Error("no such argument");
+
+    return out;
 }

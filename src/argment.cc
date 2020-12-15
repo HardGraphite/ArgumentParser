@@ -1,116 +1,159 @@
 #include <argparse.h>
-#include <cstring>
+#include <stdexcept>
+
+#include <cassert>
+#include <cctype>
+#include <cstdlib>
+#include <iomanip>
+#include <limits>
 
 using namespace hgl;
 
-ArgumentParser::Argument::Argument(const char * name,
-        const char * long_opt, char short_opt,
-        unsigned char number, const char * default_value):
-    nonset(true), name(name), long_opt(long_opt), short_opt(short_opt), number(number)
+OptionWrapper::OptionWrapper(char short_option, std::string_view long_option,
+    bool required, int param_num, const char * help):
+    long_opt(long_option), help_info(help == nullptr ? "" : help),
+    short_opt(short_option), n_args(param_num), args_given(0),
+    is_required(required), has_default(false), takes_0_or_1_arg(false)
 {
-    if (short_opt == NoShortArg && long_opt == NoLongArg)
-        throw Error("this argument has neither long name nor short name");
-
-    if (default_value != NoDefault)
+    if (param_num < 0)
     {
-        this->value = default_value;
-        this->nonset = false;
-    }
-}
-
-std::vector<std::string>
-ArgumentParser::Argument::convert_to_list(const std::string & s)
-{
-    std::vector<std::string> res;
-
-    if (s.empty())
-        return res;
-
-    std::size_t pos_beg = 0;
-    std::size_t pos_end = s.find_first_of(',', 0);
-
-    while (pos_end != std::string::npos)
-    {
-        res.emplace_back(s, pos_beg, pos_end - pos_beg);
-        pos_beg = pos_end + 1;
-        pos_end = s.find_first_of(',', pos_beg);
-    }
-    res.emplace_back(s, pos_beg);
-
-    return res;
-}
-
-std::map<std::string, std::string>
-ArgumentParser::Argument::convert_to_map(const std::string & s)
-{
-    std::map<std::string, std::string> res;
-
-    if (s.empty())
-        return res;
-
-    std::size_t pos_beg = 0;
-    std::size_t pos_end = s.find_first_of(',', 0);
-
-    auto add_pair = [&]
-    {
-        auto pos_eq = s.find_first_of('=', pos_beg);
-        if (pos_eq == std::string::npos || pos_eq > pos_end)
-            res[s.substr(pos_beg, pos_end - pos_beg)] = "";
+        if (param_num == -1)
+        {
+            n_args = 1;
+            takes_0_or_1_arg = true;
+        }
         else
-            res[s.substr(pos_beg, pos_eq - pos_beg)]
-                = s.substr(pos_eq + 1, pos_end - pos_eq - 1);
+            n_args = std::numeric_limits<decltype(n_args)>::max();
+    }
+
+    if (short_option == no_short_option && long_option == no_long_option)
+        throw std::invalid_argument("neither short_option nor long_option is provided");
+}
+
+void OptionWrapper::get_name(std::string & name) const noexcept
+{
+    name.clear();
+
+    if (this->long_opt != no_long_option)
+    {
+        name.reserve(this->long_opt.size());
+
+        for (char ch : this->long_opt)
+            name += (ch == '-') ? '_' : std::toupper(ch);
+    }
+    else if (this->short_opt != no_short_option)
+    {
+        name = std::toupper(this->short_opt);
+    }
+    else
+    {
+        assert(false);
+        name = "<?>";
+    }
+}
+
+void OptionWrapper::print_help(std::ostream & out) const noexcept
+{
+    static std::string name, buffer; // not thread safe !!
+    constexpr auto left_width = 20;
+
+    this->get_name(name);
+    buffer.clear();
+
+    auto print_args = [&] {
+        if (this->n_args == 0)
+            return;
+        buffer += ' ';
+        buffer += name;
+        if (this->n_args > 1)
+            buffer += "...";
     };
 
-    while (pos_end != std::string::npos)
+    if (this->short_opt != no_short_option)
     {
-        add_pair();
-        pos_beg = pos_end + 1;
-        pos_end = s.find_first_of(',', pos_beg);
+        buffer += '-';
+        buffer += this->short_opt;
+        print_args();
     }
-    add_pair();
 
-    return res;
-}
+    if (this->long_opt != no_long_option)
+    {
+        if (this->short_opt != no_short_option)
+            buffer += ", ";
 
-ArgumentParser::Argument &
-ArgumentParser::Argument::set_value(const std::string & s) noexcept
-{
-    this->value = s;
-    this->nonset = false;
-    return *this;
-}
+        buffer += "--";
+        buffer += this->long_opt;
+        print_args();
+    }
 
-ArgumentParser::Argument &
-ArgumentParser::Argument::set_value(const char * s) noexcept
-{
-    this->value = s;
-    this->nonset = false;
-    return *this;
-}
 
-bool ArgumentParser::Argument::operator==(const Argument & a) const noexcept
-{
-#if false
-    return (this->short_opt == a.short_opt)
-        && ((this->long_opt == NoLongArg) ?
-            (a.long_opt == NoLongArg) :
-            (a.long_opt == NoLongArg ?
-                true : std::strcmp(this->long_opt, a.long_opt) == 0));
-#else
-    return std::strcmp(this->name, a.name) == 0;
-#endif
-}
+    if (this->help_info == nullptr)
+    {
+        out << buffer;
+        return;
+    }
 
-bool ArgumentParser::Argument::operator<(const Argument & a) const
-{
-#if false
-    if (this->short_opt != NoShortArg && a.short_opt != NoShortArg)
-        return this->short_opt < a.short_opt;
-    else if (this->long_opt != NoLongArg && a.long_opt != NoLongArg)
-        return std::strcmp(this->long_opt, a.long_opt) < 0;
+    auto pos_diff = buffer.length();
+    if (pos_diff > left_width)
+    {
+        out << buffer << '\n';
+        for (int i = 0; i < left_width; i++)
+            out << ' ';
+    }
     else
-        throw Error("this argument has neither long name nor short name");
-#else
-    return std::strcmp(this->name, a.name) < 0;
-#endif
+    {
+        out << std::setfill(' ') << std::setw(left_width) << std::left << buffer;
+    }
+
+    out << ' ' << ' ' << this->help_info;
+}
+
+
+void FlagOption::parse_from_text(std::string_view text)
+{
+    if (text == "1" || text == "true" || text == "on" || text == "yes" || text.empty())
+        this->value = true;
+    else if (text == "0" || text == "false" || text == "off" || text == "no")
+        this->value = false;
+    else
+    {
+        std::string msg("no a valid bool literal: ");
+        msg += text;
+        throw ArgumentParseError(std::move(msg));
+    }
+}
+
+void IntOption::parse_from_text(std::string_view text)
+{
+    auto str = text.data();
+    char * end;
+
+    this->value = std::strtol(str, &end, 0);
+
+    if (this->value == 0 && str == end)
+    {
+        std::string msg("no a valid int literal: ");
+        msg += text;
+        throw ArgumentParseError(std::move(msg));
+    }
+}
+
+void FloatOption::parse_from_text(std::string_view text)
+{
+    auto str = text.data();
+    char * end;
+
+    this->value = std::strtod(str, &end);
+
+    if (this->value == 0 && str == end)
+    {
+        std::string msg("no a valid float literal: ");
+        msg += text;
+        throw ArgumentParseError(std::move(msg));
+    }
+}
+
+void StringOption::parse_from_text(std::string_view text)
+{
+    this->value = text;
 }
