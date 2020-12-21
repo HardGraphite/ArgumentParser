@@ -10,13 +10,13 @@
 #include <ostream>
 #include <string>
 #include <string_view>
-#include <vector>
+#include <list>
 
 #ifndef HGLAP_NO_EXTENSION
 #include <type_traits>
 #endif // HGLAP_NO_EXTENSION
 
-namespace hgl
+namespace hgl::ap
 {
     /// parse error
     class ArgumentParseError: public std::exception
@@ -98,7 +98,7 @@ namespace hgl
         virtual void print_help(std::ostream & out) const noexcept;
     };
 
-    /// rest aruments
+    /// rest arguments
     class RestArgsWrapper
     {
     public:
@@ -109,16 +109,34 @@ namespace hgl
     class ArgumentParser
     {
     private:
-        std::string_view            prog_name;
-        std::vector<OptionWrapper*> options;
-        RestArgsWrapper           * rest_args;
+        struct OptionWrapperArray
+        {
+            using value_type = OptionWrapper * const;
+            value_type * p_beg, * p_end;
+            auto begin() const noexcept { return p_beg; }
+            auto end() const noexcept { return p_end; }
+        };
+
+        std::string_view    prog_name;
+        OptionWrapperArray  options;
+        RestArgsWrapper   * rest_args;
 
         void chech_options();
 
     public:
         ArgumentParser() = default;
-        ArgumentParser(std::initializer_list<OptionWrapper*> opts);
-        ArgumentParser(std::initializer_list<OptionWrapper*> opts, RestArgsWrapper * rest);
+        ArgumentParser(std::initializer_list<OptionWrapper*> opts,
+            RestArgsWrapper * rest = nullptr);
+        ArgumentParser(OptionWrapper * const * opt_begin,
+            OptionWrapper * const * opt_end, RestArgsWrapper * rest = nullptr);
+
+        /**
+         * @brief re-assign options array
+         * 
+         * @param begin frist elem of the array of options
+         * @param end the one after last elem of the array of options
+         */
+        void set_options(OptionWrapper * const * begin, OptionWrapper * const * end) noexcept;
 
         /**
          * @brief parse command line arguments
@@ -137,8 +155,6 @@ namespace hgl
          */
         std::ostream & print_help(std::ostream & out) const noexcept;
     };
-
-#ifndef HGLAP_NO_EXTENSION
 
     struct FlagOption: OptionWrapper
     {
@@ -177,48 +193,57 @@ namespace hgl
     };
 
     template <typename SVAlloc = std::allocator<std::string_view>>
-    struct RestArguments: RestArgsWrapper, std::vector<std::string_view, SVAlloc>
+    struct RestArguments: RestArgsWrapper, std::list<std::string_view, SVAlloc>
     {
         virtual void append(std::string_view text) override;
     };
 
+#ifndef HGLAP_NO_EXTENSION
+
 #endif // HGLAP_NO_EXTENSION
 
-} // namespace hgl
+} // namespace hgl::ap
 
 
-inline hgl::OptionWrapper &
-hgl::OptionWrapper::set_default(std::string_view _default) noexcept
+inline hgl::ap::OptionWrapper &
+hgl::ap::OptionWrapper::set_default(std::string_view _default) noexcept
 {
     this->parse_from_text(_default);
     this->has_default = true;
     return *this;
 }
 
-inline
-hgl::ArgumentParser::ArgumentParser(std::initializer_list<OptionWrapper*> opts):
-    options(opts), rest_args(nullptr)
+inline hgl::ap::ArgumentParser::ArgumentParser(
+    std::initializer_list<OptionWrapper*> opts, RestArgsWrapper * rest):
+    options{.p_beg=opts.begin(), .p_end=opts.end()}, rest_args(rest)
 {
 #ifndef NDEBUG
     this->chech_options();
 #endif // NDEBUG
 }
 
-inline
-hgl::ArgumentParser::ArgumentParser(std::initializer_list<OptionWrapper*> opts,
-    RestArgsWrapper * rest): options(opts), rest_args(rest)
+inline hgl::ap::ArgumentParser::ArgumentParser(OptionWrapper * const * opt_begin,
+    OptionWrapper * const * opt_end, RestArgsWrapper * rest):
+    options{.p_beg=opt_begin, .p_end=opt_end}, rest_args(rest)
 {
 #ifndef NDEBUG
     this->chech_options();
 #endif // NDEBUG
 }
 
-#ifndef HGLAP_NO_EXTENSION
+inline void hgl::ap::ArgumentParser::set_options(
+    OptionWrapper * const * begin, OptionWrapper * const * end) noexcept
+{
+    this->options.p_beg = begin;
+    this->options.p_end = end;
+}
 
 template <typename SVAlloc>
-inline void hgl::RestArguments<SVAlloc>::append(std::string_view text)
+inline void hgl::ap::RestArguments<SVAlloc>::append(std::string_view text)
 {
     this->emplace_back(text);
 };
+
+#ifndef HGLAP_NO_EXTENSION
 
 #endif // HGLAP_NO_EXTENSION

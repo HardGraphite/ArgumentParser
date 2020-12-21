@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-using namespace hgl;
+using namespace hgl::ap;
 using namespace std::literals::string_view_literals;
 
 static constexpr auto _strbuf_size = 256;

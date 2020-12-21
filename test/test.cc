@@ -2,7 +2,7 @@
 
 #include <iostream>
 
-using namespace hgl;
+using namespace hgl::ap;
 
 struct HelpOption: FlagOption
 {

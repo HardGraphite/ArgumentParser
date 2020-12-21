@@ -7,7 +7,7 @@
 #include <iomanip>
 #include <limits>
 
-using namespace hgl;
+using namespace hgl::ap;
 
 OptionWrapper::OptionWrapper(char short_option, std::string_view long_option,
     bool required, int param_num, const char * help):
