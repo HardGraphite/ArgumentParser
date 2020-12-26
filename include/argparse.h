@@ -12,10 +12,6 @@
 #include <string_view>
 #include <list>
 
-#ifndef HGLAP_NO_EXTENSION
-#include <type_traits>
-#endif // HGLAP_NO_EXTENSION
-
 namespace hgl::ap
 {
     /// parse error
@@ -33,217 +29,325 @@ namespace hgl::ap
         const char * what() const noexcept override { return msg.c_str(); }
     };
 
-    /// option wrapper, base of any option types
-    class OptionWrapper
+    /// arguments acceptor
+    class ArgumentAcceptor
     {
     protected:
-        std::string_view long_opt;
-        const char     * help_info;
-        char             short_opt;
-        unsigned char    n_args;
-        unsigned char    args_given;
-        bool             is_required: 1;
-        bool             has_default: 1;
-        bool             takes_0_or_1_arg: 1;
+        bool completed         : 1;
+        bool accepting_longopt : 1; ///< accepting arg with long option name
+        bool accepting_shortopt: 1; ///< accepting arg with short option name
+        bool accepting_restarg : 1; ///< accepting arg with no option name
+        bool required          : 1;
+
+        bool          _bit_0: 1;
+        bool          _bit_1: 1;
+        bool          _bit_2: 1;
+        std::uint8_t  _u8;
+        std::uint16_t _u16;
 
         /**
-         * @brief parse data from text and record the value
-         * 
-         * @param text text from command line args
-         *  (if this option takes no arguemtn i.e. n_args==0, text will be empty)
+         * @brief test whether a long option name is acceptable
+         *
+         * @param long_opt option name
+         * @return neg: not acceptable; pos or 0: number of arguments to consume
+         *
+         * @note check accepting_longopt before call this
          */
-        virtual void parse_from_text(std::string_view text) = 0;
+        virtual int acceptable(std::string_view long_opt) const noexcept;
+        /**
+         * @brief test whether a short option name is acceptable
+         *
+         * @param short_opt option name
+         * @return neg: not acceptable; pos or 0: number of arguments to consume
+         *
+         * @note check accepting_shortopt before call this
+         */
+        virtual int acceptable(char short_opt) const noexcept;
+        /**
+         * @brief test whether no-option-name arg is acceptable
+         *
+         * @return neg: not acceptable; pos or 0: number of arguments to consume
+         *
+         * @note check accepting_restarg before call this
+         */
+        virtual int acceptable(std::nullptr_t) const noexcept;
+
+        /**
+         * @brief accept an option with out attached data
+         */
+        virtual void accept(std::nullptr_t);
+        /**
+         * @brief parse data from text and record the value
+         *
+         * @param text text from command line args (it can be empty)
+         */
+        virtual void accept(std::string_view text);
+        /**
+         * @brief parse data from a few text and record the value
+         *
+         * @param n number of arguments
+         * @param text text from command line args
+         *
+         * @note if `n` == 0, accept(std::nullptr_t) will be called by default;
+         *  if `n` == 1, accept(std::string_view text) will be called by default
+         */
+        virtual void accept(int n, const char ** text);
+        /// @see void accept(std::nullptr_t)
+        virtual void accept(std::string_view opt_name, std::nullptr_t);
+        /// @see void accept(std::string_view text)
+        virtual void accept(std::string_view opt_name, std::string_view text);
+        /// @see void accept(int n, const char ** text)
+        virtual void accept(std::string_view opt_name, int n, const char ** text);
+
+        void mark_completed() noexcept;
+
+        ArgumentAcceptor(
+            bool completed, bool accepting_longopt,
+            bool accepting_shortop, bool accepting_restarg,
+            bool required,  std::uint8_t _u8 = 0, std::uint16_t _u16 = 0):
+            completed(completed), accepting_longopt(accepting_longopt),
+            accepting_shortopt(accepting_shortop), accepting_restarg(accepting_restarg),
+            required(required), _u8(_u8), _u16(_u16) {}
+
+        virtual void print_useage(std::ostream & out) const noexcept = 0;
+        virtual void print_helpinfo(std::ostream & out) const noexcept = 0;
 
         friend class ArgumentParser;
 
     public:
-        static constexpr char no_short_option = '\0';
-        static constexpr std::string_view no_long_option = "";
-
         /**
-         * @brief construct a new OptionWrapper
-         * 
-         * @param short_option short option name
-         * @param long_option  long option name
-         * @param required     whether the option must be provided
-         * @param param_num    number of arguments this option consumes
-         *  (specially, `-2` means more than 1, `-1` means 0 or 1)
-         * @param help         help infomation
-         * 
-         * @throw std::invalid_argument if any argument is invalid
+         * @brief get accepter name
+         *
+         * @param[out] name accepter name
          */
-        OptionWrapper(char short_option, std::string_view long_option,
-            bool required = true, int param_num = 1, const char * help = nullptr);
-
-        /**
-         * @brief set default value
-         * 
-         * @param _default default value
-         * @return ref to self
-         */
-        OptionWrapper & set_default(std::string_view _default) noexcept;
-
-        /**
-         * @brief get option name
-         * 
-         * @param [OUT] name option name
-         */
-        virtual void get_name(std::string & name) const noexcept;
-
-        /**
-         * @brief print help infomation
-         * 
-         * @param out output stream
-         */
-        virtual void print_help(std::ostream & out) const noexcept;
-    };
-
-    /// rest arguments
-    class RestArgsWrapper
-    {
-    public:
-        virtual void append(std::string_view text) = 0;
+        virtual void get_name(std::string & name) const noexcept = 0;
     };
 
     /// argument parser
     class ArgumentParser
     {
     private:
-        struct OptionWrapperArray
+        struct ArgAcceptorArray
         {
-            using value_type = OptionWrapper * const;
+            using value_type = ArgumentAcceptor * const;
             value_type * p_beg, * p_end;
             auto begin() const noexcept { return p_beg; }
             auto end() const noexcept { return p_end; }
         };
 
-        std::string_view    prog_name;
-        OptionWrapperArray  options;
-        RestArgsWrapper   * rest_args;
+        std::string_view prog_name;
+        ArgAcceptorArray acceptors;
 
-        void chech_options();
+        void chech_health();
+        bool is_duplicated(int, std::string_view);
 
     public:
         ArgumentParser() = default;
-        ArgumentParser(std::initializer_list<OptionWrapper*> opts,
-            RestArgsWrapper * rest = nullptr);
-        ArgumentParser(OptionWrapper * const * opt_begin,
-            OptionWrapper * const * opt_end, RestArgsWrapper * rest = nullptr);
+        ArgumentParser(std::initializer_list<ArgumentAcceptor*> aas);
+        ArgumentParser(ArgumentAcceptor * const * aa_begin, ArgumentAcceptor * const * aa_end);
 
         /**
-         * @brief re-assign options array
-         * 
-         * @param begin frist elem of the array of options
-         * @param end the one after last elem of the array of options
+         * @brief re-assign acceptors array
+         *
+         * @param begin frist elem of the array of acceptors
+         * @param end the one after last elem of the array of acceptors
          */
-        void set_options(OptionWrapper * const * begin, OptionWrapper * const * end) noexcept;
+        void set_acceptors(ArgumentAcceptor * const * begin, ArgumentAcceptor * const * end) noexcept;
 
         /**
          * @brief parse command line arguments
-         * 
+         *
          * @param argc number of command line arguments
          * @param argv command line argument vector
-         * 
+         *
          * @throw ArgumentParseError if error occurs
          */
         void operator()(int argc, const char * argv[]);
 
         /**
          * @brief print help infomation
-         * 
+         *
          * @param out output stream
          */
         std::ostream & print_help(std::ostream & out) const noexcept;
     };
 
-    struct FlagOption: OptionWrapper
+
+    /// option
+    class Option: public ArgumentAcceptor
     {
-        bool value;
+    protected:
+        std::string_view _long_opt;
+        const char     * help_info;
 
-        using OptionWrapper::OptionWrapper;
+        auto & long_opt() noexcept { return _long_opt; }
+        auto & short_opt() noexcept { return reinterpret_cast<char&>(_u8); }
+        auto & n_args() noexcept { return _u16; }
+        auto & long_opt() const noexcept { return _long_opt; }
+        auto & short_opt() const noexcept { return reinterpret_cast<const char&>(_u8); }
+        auto & n_args() const noexcept { return _u16; }
 
-        virtual void parse_from_text(std::string_view text) override;
+        virtual int acceptable(std::string_view long_opt) const noexcept override;
+        virtual int acceptable(char short_opt) const noexcept override;
+        virtual void accept(std::string_view opt_name, std::string_view text) override;
+        virtual void accept(std::string_view opt_name, int n, const char ** text) override;
+        using ArgumentAcceptor::accept;
+
+    public:
+        static constexpr char no_short_option = '\0';
+        static constexpr std::string_view no_long_option = "";
+
+        /**
+         * @brief construct a new Option
+         *
+         * @param short_option short option name
+         * @param long_option  long option name
+         * @param required     whether the option must be provided
+         * @param param_num    number of arguments this option consumes
+         * @param help         help infomation
+         *
+         * @throw std::invalid_argument if any argument is invalid
+         */
+        Option(char short_option, std::string_view long_option,
+            bool required = true, int param_num = 1, const char * help = nullptr);
+
+        virtual void get_name(std::string & name) const noexcept override;
+        virtual void print_useage(std::ostream & out) const noexcept override;
+        virtual void print_helpinfo(std::ostream & out) const noexcept override;
     };
 
-    struct IntOption: OptionWrapper
+    /// text argument (no option name)
+    class TextArg: public ArgumentAcceptor
     {
-        long value;
+    protected:
+        std::string_view name;
 
-        using OptionWrapper::OptionWrapper;
+        virtual int acceptable(std::nullptr_t) const noexcept override;
+        virtual void accept(std::string_view text) override;
 
-        virtual void parse_from_text(std::string_view text) override;
+    public:
+        std::string_view text;
+
+        TextArg(std::string_view name, bool required);
+
+        virtual void get_name(std::string & name) const noexcept override;
+        virtual void print_useage(std::ostream & out) const noexcept override;
+        virtual void print_helpinfo(std::ostream & out) const noexcept override;
     };
 
-    struct FloatOption: OptionWrapper
+
+    /// option that takes one value
+    template <typename T> struct SignleValueOption: Option
     {
-        double value;
+        using value_type = T;
 
-        using OptionWrapper::OptionWrapper;
+        value_type value;
 
-        virtual void parse_from_text(std::string_view text) override;
+        SignleValueOption(char short_option, std::string_view long_option,
+            bool required = true, const char * help = nullptr):
+            Option(short_option, long_option, required, 1, help) {}
     };
 
-    struct StringOption: OptionWrapper
+    template <> struct SignleValueOption<bool>: Option
     {
-        std::string_view value;
+        using value_type = bool;
 
-        using OptionWrapper::OptionWrapper;
+        SignleValueOption(char short_option, std::string_view long_option,
+            bool required = true, const char * help = nullptr):
+            Option(short_option, long_option, required, 1, help) {}
 
-        virtual void parse_from_text(std::string_view text) override;
+        value_type value() const noexcept { return _bit_0; }
+        void value(value_type v) noexcept { _bit_0 = v; }
     };
 
-    template <typename SVAlloc = std::allocator<std::string_view>>
-    struct RestArguments: RestArgsWrapper, std::list<std::string_view, SVAlloc>
+    struct FlagOption: SignleValueOption<bool>
     {
-        virtual void append(std::string_view text) override;
+        FlagOption(char short_option, std::string_view long_option,
+            bool required = true, const char * help = nullptr):
+        SignleValueOption<bool>(short_option, long_option, required, help)
+        { n_args() = 0; }
+
+    protected:
+        virtual int acceptable(std::string_view long_opt) const noexcept override;
+        virtual void accept(std::string_view text, std::nullptr_t) override;
     };
 
-#ifndef HGLAP_NO_EXTENSION
+    struct BoolOption: SignleValueOption<bool>
+    {
+        using SignleValueOption<bool>::SignleValueOption;
 
-#endif // HGLAP_NO_EXTENSION
+    protected:
+        virtual void accept(std::string_view text) override;
+    };
+
+    struct IntOption: SignleValueOption<long>
+    {
+        using SignleValueOption<long>::SignleValueOption;
+
+    protected:
+        virtual void accept(std::string_view text) override;
+    };
+
+    struct FloatOption: SignleValueOption<double>
+    {
+        using SignleValueOption<double>::SignleValueOption;
+
+    protected:
+        virtual void accept(std::string_view text) override;
+    };
+
+    struct StringOption: SignleValueOption<std::string_view>
+    {
+        using SignleValueOption<std::string_view>::SignleValueOption;
+
+    protected:
+        virtual void accept(std::string_view text) override;
+    };
+
+    /// throw pointer to self when accepting
+    class SpecialOption: public Option
+    {
+    private:
+        virtual void accept(std::nullptr_t) override;
+
+    public:
+        SpecialOption(char short_option, std::string_view long_option,
+            const char * help = nullptr):
+            Option(short_option, long_option, false, 0, help) {}
+    };
 
 } // namespace hgl::ap
 
 
-inline hgl::ap::OptionWrapper &
-hgl::ap::OptionWrapper::set_default(std::string_view _default) noexcept
+inline void hgl::ap::ArgumentAcceptor::mark_completed() noexcept
 {
-    this->parse_from_text(_default);
-    this->has_default = true;
-    return *this;
+    completed = true;
+    accepting_longopt = false;
+    accepting_shortopt = false;
+    accepting_restarg = false;
 }
 
 inline hgl::ap::ArgumentParser::ArgumentParser(
-    std::initializer_list<OptionWrapper*> opts, RestArgsWrapper * rest):
-    options{.p_beg=opts.begin(), .p_end=opts.end()}, rest_args(rest)
+    std::initializer_list<ArgumentAcceptor*> aas):
+    acceptors{.p_beg=aas.begin(), .p_end=aas.end()}
 {
 #ifndef NDEBUG
-    this->chech_options();
+    this->chech_health();
 #endif // NDEBUG
 }
 
-inline hgl::ap::ArgumentParser::ArgumentParser(OptionWrapper * const * opt_begin,
-    OptionWrapper * const * opt_end, RestArgsWrapper * rest):
-    options{.p_beg=opt_begin, .p_end=opt_end}, rest_args(rest)
+inline hgl::ap::ArgumentParser::ArgumentParser(
+    ArgumentAcceptor * const * aa_begin, ArgumentAcceptor * const * aa_end):
+    acceptors{.p_beg=aa_begin, .p_end=aa_end}
 {
 #ifndef NDEBUG
-    this->chech_options();
+    this->chech_health();
 #endif // NDEBUG
 }
 
-inline void hgl::ap::ArgumentParser::set_options(
-    OptionWrapper * const * begin, OptionWrapper * const * end) noexcept
+inline void hgl::ap::ArgumentParser::set_acceptors(
+    ArgumentAcceptor * const * begin, ArgumentAcceptor * const * end) noexcept
 {
-    this->options.p_beg = begin;
-    this->options.p_end = end;
+    this->acceptors.p_beg = begin;
+    this->acceptors.p_end = end;
 }
-
-template <typename SVAlloc>
-inline void hgl::ap::RestArguments<SVAlloc>::append(std::string_view text)
-{
-    this->emplace_back(text);
-};
-
-#ifndef HGLAP_NO_EXTENSION
-
-#endif // HGLAP_NO_EXTENSION

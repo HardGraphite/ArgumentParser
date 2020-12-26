@@ -1,5 +1,6 @@
 #include <argparse.h>
 
+#include <cassert>
 #include <cstdarg>
 #include <cstdio>
 #include <stdexcept>
@@ -32,8 +33,8 @@ static thread_local char _strbug[_strbuf_size];
     throw std::invalid_argument(_strbug);
 }
 
-[[noreturn]] static void _throw_0a_req_qa_given(
-    const char * text, const OptionWrapper * opt)
+[[noreturn]] static void _throw_0a_req_1a_given(
+    const char * text, const ArgumentAcceptor * opt)
 {
     std::string buffer;
     opt->get_name(buffer);
@@ -41,9 +42,13 @@ static thread_local char _strbug[_strbuf_size];
         "but 1 is given", text, buffer.c_str());
 }
 
-[[noreturn]] static void _throw_not_restargs_recv(const char * text)
+[[noreturn]] static void _throw_na_req_1a_given(
+    const char * text, int req_n, const ArgumentAcceptor * opt)
 {
-    _throw_parse_error("\"%s\": unexpected rest-arguments", text);
+    std::string buffer;
+    opt->get_name(buffer);
+    _throw_parse_error("\"%s\": option %s consumes %i argument "
+        "but 1 is given", text, buffer.c_str(), req_n);
 }
 
 [[noreturn]] static void _throw_unknown_opt(const char * text, std::string_view opt)
@@ -52,41 +57,65 @@ static thread_local char _strbug[_strbuf_size];
     _throw_parse_error("\"%s\": unknown option: %s", text, buffer.c_str());
 }
 
-[[noreturn]] static void _throw_too_many_args(const char * text, std::string_view opt)
+[[noreturn]] static void _throw_duplicated_opt(const char * text, std::string_view opt)
 {
     std::string buffer(opt);
-    _throw_parse_error("\"%s\": too may arguments for option %s", text, buffer.c_str());
+    _throw_parse_error("\"%s\": duplicated option: %s", text, buffer.c_str());
 }
 
-void ArgumentParser::chech_options()
+[[noreturn]] static void _throw_unexpected_arg(const char * text)
 {
-    for (OptionWrapper * opt: this->options)
+    _throw_parse_error("\"%s\": unexpected argument", text);
+}
+
+[[noreturn]] static void _throw_too_many_args(const ArgumentAcceptor * aa)
+{
+    std::string name;
+    aa->get_name(name);
+    _throw_parse_error("too may arguments for option %s", name.c_str());
+}
+
+[[noreturn]] static void _throw_too_few_args(const ArgumentAcceptor * aa)
+{
+    std::string name;
+    aa->get_name(name);
+    _throw_parse_error("too few arguments for option %s", name.c_str());
+}
+
+void ArgumentParser::chech_health()
+{
+}
+
+bool ArgumentParser::is_duplicated(int type, std::string_view optname)
+{
+    if (type == 1)
     {
-        if (opt->short_opt != opt->no_short_option)
+        for (ArgumentAcceptor * acceptor: acceptors)
         {
-            for (OptionWrapper * opt1: this->options)
-            {
-                if (opt1->short_opt == opt1->no_short_option || opt1 == opt)
-                    continue;
-
-                if (opt1->short_opt == opt->short_opt)
-                    _throw_std_invalid_argument("more than one options have %s name '%c'", "short", opt->short_opt);
-            }
-        }
-
-
-        if (opt->long_opt != opt->no_long_option)
-        {
-            for (OptionWrapper * opt1: this->options)
-            {
-                if (opt1->long_opt == opt1->no_long_option || opt1 == opt)
-                    continue;
-
-                if (opt1->long_opt == opt->long_opt)
-                    _throw_std_invalid_argument("more than one options have %s name \"%s\"", "long", opt->long_opt);
-            }
+            const bool fc = acceptor->completed, fa = acceptor->accepting_shortopt;
+            acceptor->completed = false, acceptor->accepting_shortopt = true;
+            const bool r = acceptor->acceptable(optname.front()) >= 0;
+            acceptor->completed = fc, acceptor->accepting_shortopt = fa;
+            if (r) return true;
         }
     }
+    else if (type == 2)
+    {
+        for (ArgumentAcceptor * acceptor: acceptors)
+        {
+            const bool fc = acceptor->completed, fa = acceptor->accepting_longopt;
+            acceptor->completed = false, acceptor->accepting_longopt = true;
+            const bool r = acceptor->acceptable(optname) >= 0;
+            acceptor->completed = fc, acceptor->accepting_longopt = fa;
+            if (r) return true;
+        }
+    }
+    else
+    {
+        assert(false);
+    }
+
+    return false;
 }
 
 void ArgumentParser::operator()(int argc, const char * argv[])
@@ -107,24 +136,58 @@ void ArgumentParser::operator()(int argc, const char * argv[])
     const arg_t * iter_end = argv + argc;
     std::string_view cur_opt, value;
 
+    auto accept_args = [&] (ArgumentAcceptor * acceptor, int n_args) {
+        assert(n_args >= 1);
+
+        const char ** args_begin = iter;
+
+        --iter;
+        for (int i = 0; i < n_args; i++)
+        {
+            ++iter;
+
+            if (iter == iter_end || **iter == '-')
+                _throw_too_few_args(acceptor);
+        }
+
+        acceptor->accept(cur_opt, n_args, args_begin);
+    };
+
     for (; iter < iter_end; ++iter)
     {
         cur_opt = *iter;
 
         if (cur_opt == "--"sv)
         {
-            if (this->rest_args == nullptr)
-                _throw_not_restargs_recv(*iter);
-
             for (++iter; iter != iter_end; ++iter)
-                this->rest_args->append(*iter);
+            {
+                for (ArgumentAcceptor * acceptor: this->acceptors)
+                {
+                    if (!acceptor->accepting_restarg)
+                        continue;
+
+                    auto n = acceptor->acceptable(nullptr);
+                    assert(n > 0);
+
+                    accept_args(acceptor, n);
+
+                    goto _NEXT_LOOP;
+                }
+            }
         }
         else if (cur_opt == "-"sv)
         {
-            if (this->rest_args == nullptr)
-                _throw_not_restargs_recv(*iter);
+            for (ArgumentAcceptor * acceptor: this->acceptors)
+            {
+                if (!(acceptor->accepting_restarg && acceptor->acceptable(nullptr) == 1))
+                    continue;
 
-            this->rest_args->append(cur_opt);
+                acceptor->accept(cur_opt, cur_opt);
+
+                goto _NEXT_LOOP;
+            }
+
+            _throw_unexpected_arg(*iter);
         }
 #ifdef __cpp_lib_starts_ends_with
         else if (cur_opt.starts_with("--"sv))
@@ -141,43 +204,44 @@ void ArgumentParser::operator()(int argc, const char * argv[])
                 cur_opt.remove_suffix(value.size() + 1); // "xxx"
             }
 
-            for (OptionWrapper * opt: this->options)
+            for (ArgumentAcceptor * acceptor: this->acceptors)
             {
-                if (opt->long_opt == opt->no_long_option
-                 || opt->long_opt != cur_opt)
+                if (!acceptor->accepting_longopt)
                     continue;
 
-                if (opt->args_given >= opt->n_args
-                 && !(opt->takes_0_or_1_arg && opt->args_given <= 1))
-                    _throw_too_many_args(*iter, cur_opt);
+                const auto n = acceptor->acceptable(cur_opt);
+                if (n < 0)
+                    continue;
 
-                if (equal_pos != cur_opt.npos)
+                if (n == 0)
                 {
-                    if (opt->n_args == 0)
-                        _throw_0a_req_qa_given(*iter, opt);
+                    if (equal_pos != cur_opt.npos)
+                        _throw_0a_req_1a_given(*iter, acceptor);
 
-                    opt->parse_from_text(value);
-                    opt->args_given++;
+                    acceptor->accept(cur_opt, nullptr);
                 }
-
-                if (opt->n_args == 0)
+                else
                 {
-                    opt->parse_from_text(""sv);
-                    goto _NEXT_LOOP;
-                }
+                    if (equal_pos != cur_opt.npos)
+                    {
+                        if (n != 1)
+                            _throw_na_req_1a_given(*iter, n, acceptor);
 
-                for (++iter;
-                    opt->args_given < opt->n_args && iter != iter_end && **iter != '-';
-                    opt->args_given++, ++iter)
-                {
-                    opt->parse_from_text(*iter);
+                        acceptor->accept(cur_opt, value);
+                    }
+                    else
+                    {
+                        ++iter;
+                        accept_args(acceptor, n);
+                    }
                 }
-                --iter;
 
                 goto _NEXT_LOOP;
             }
 
-            _throw_unknown_opt(*iter, cur_opt);
+            this->is_duplicated(2, cur_opt) ?
+                _throw_duplicated_opt(*iter, cur_opt):
+                _throw_unknown_opt(*iter, cur_opt);
         }
 #ifdef __cpp_lib_starts_ends_with
         else if (cur_opt.starts_with('-'))
@@ -194,66 +258,73 @@ void ArgumentParser::operator()(int argc, const char * argv[])
                 cur_opt.remove_suffix(value.size()); // "f"
             }
 
-            for (OptionWrapper * opt: this->options)
+            for (ArgumentAcceptor * acceptor: this->acceptors)
             {
-                if (opt->short_opt == opt->no_short_option
-                 || opt->short_opt != cur_opt.front())
+                if (!acceptor->accepting_shortopt)
                     continue;
 
-                if (opt->args_given >= opt->n_args && opt->args_given > 0
-                 && !(opt->takes_0_or_1_arg && opt->args_given <= 1))
-                    _throw_too_many_args(*iter, cur_opt);
+                const auto n = acceptor->acceptable(cur_opt.front());
+                if (n < 0)
+                    continue;
 
-                if (has_value)
+                if (n == 0)
                 {
-                    if (opt->n_args == 0)
-                        _throw_0a_req_qa_given(*iter, opt);
+                    if (has_value)
+                        _throw_0a_req_1a_given(*iter, acceptor);
 
-                    opt->parse_from_text(value);
-                    opt->args_given++;
+                    acceptor->accept(cur_opt, nullptr);
                 }
-
-                if (opt->n_args == 0)
+                else
                 {
-                    opt->parse_from_text(""sv);
-                    goto _NEXT_LOOP;
-                }
+                    if (has_value)
+                    {
+                        if (n != 1)
+                            _throw_na_req_1a_given(*iter, n, acceptor);
 
-                for (++iter;
-                    opt->args_given < opt->n_args && iter != iter_end && **iter != '-';
-                    opt->args_given++, ++iter)
-                {
-                    opt->parse_from_text(*iter);
+                        acceptor->accept(cur_opt, value);
+                    }
+                    else
+                    {
+                        ++iter;
+                        accept_args(acceptor, n);
+                    }
                 }
-                --iter;
 
                 goto _NEXT_LOOP;
             }
 
-            _throw_unknown_opt(*iter, cur_opt);
+            this->is_duplicated(1, cur_opt) ?
+                _throw_duplicated_opt(*iter, cur_opt):
+                _throw_unknown_opt(*iter, cur_opt);
         }
         else
         {
-            if (this->rest_args == nullptr)
-                _throw_not_restargs_recv(*iter);
+            for (ArgumentAcceptor * acceptor: this->acceptors)
+            {
+                if (!acceptor->accepting_restarg)
+                    continue;
 
-            this->rest_args->append(cur_opt);
+                const auto n = acceptor->acceptable(nullptr);
+                assert(n > 0);
+
+                accept_args(acceptor, n);
+
+                goto _NEXT_LOOP;
+            }
+
+            _throw_unexpected_arg(*iter);
         }
 
     _NEXT_LOOP:;
     }
 
-    for (OptionWrapper * opt: this->options)
+    for (ArgumentAcceptor * acceptor: this->acceptors)
     {
-        if (!(opt->args_given >= opt->n_args
-         || !opt->is_required
-         || opt->has_default
-         || (opt->n_args == 1 && opt->takes_0_or_1_arg)))
+        if (!acceptor->completed)
         {
             std::string name;
-            opt->get_name(name);
-            _throw_parse_error("option %s takes %i arg(s) but %i were given",
-                name.c_str(), opt->n_args, opt->args_given);
+            acceptor->get_name(name);
+            _throw_parse_error("no enough arguments for %s", name.c_str());
         }
     }
 }
@@ -261,17 +332,17 @@ void ArgumentParser::operator()(int argc, const char * argv[])
 
 std::ostream & ArgumentParser::print_help(std::ostream & out) const noexcept
 {
-    out << "Usage: " << this->prog_name << " [OPTIONS]";
-    if (this->rest_args != nullptr)
-        out << " ...";
+    out << "Usage: " << this->prog_name << ' ';
+    for (ArgumentAcceptor * acceptor: this->acceptors)
+    {
+        acceptor->print_useage(out);
+        out << ' ';
+    }
     out << '\n' << '\n';
 
     out << "Options:\n";
-    for (OptionWrapper * opt: this->options)
-    {
-        opt->print_help(out);
-        out << '\n';
-    }
+    for (ArgumentAcceptor * acceptor: this->acceptors)
+        acceptor->print_helpinfo(out);
 
     return out;
 }
